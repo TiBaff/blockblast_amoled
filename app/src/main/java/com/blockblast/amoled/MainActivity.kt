@@ -3,6 +3,8 @@ package com.blockblast.amoled
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -143,28 +146,24 @@ fun GameScreen(
     var boardBounds by remember { mutableStateOf(Rect.Zero) }
 
     val density = LocalDensity.current
-    val liftOffsetPx = with(density) { 90.dp.toPx() }
+    // Offset piece 85dp above finger so it is fully visible above player's thumb
+    val fingerLiftPx = with(density) { 85.dp.toPx() }
 
     // Calculate hover cell
     val hoveredCoord: Pair<Int, Int>? = remember(draggedSlotIndex, dragGlobalPosition, boardBounds) {
         val slot = draggedSlotIndex ?: return@remember null
         val shape = viewModel.availableShapes.getOrNull(slot) ?: return@remember null
-        if (boardBounds == Rect.Zero) return@remember null
+        if (boardBounds.width <= 0f || boardBounds.height <= 0f) return@remember null
 
         val cellWidth = boardBounds.width / 8f
         val cellHeight = boardBounds.height / 8f
 
-        val effectiveX = dragGlobalPosition.x
-        val effectiveY = dragGlobalPosition.y - liftOffsetPx
+        // Position lifted above the finger
+        val pieceCenterX = dragGlobalPosition.x
+        val pieceCenterY = dragGlobalPosition.y - fingerLiftPx
 
-        if (effectiveX < boardBounds.left || effectiveX > boardBounds.right ||
-            effectiveY < boardBounds.top || effectiveY > boardBounds.bottom
-        ) {
-            return@remember null
-        }
-
-        val startCol = ((effectiveX - boardBounds.left) / cellWidth).toInt() - shape.width / 2
-        val startRow = ((effectiveY - boardBounds.top) / cellHeight).toInt() - shape.height / 2
+        val startCol = ((pieceCenterX - boardBounds.left) / cellWidth - shape.width / 2f).roundToInt()
+        val startRow = ((pieceCenterY - boardBounds.top) / cellHeight - shape.height / 2f).roundToInt()
 
         if (viewModel.canPlace(shape, startRow, startCol)) {
             startRow to startCol
@@ -269,12 +268,13 @@ fun GameScreen(
                             .fillMaxHeight(),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (shape != null && draggedSlotIndex != i) {
+                        if (shape != null) {
                             ShapeItemView(
                                 shape = shape,
-                                onDragStart = { startOffset ->
+                                isBeingDragged = (draggedSlotIndex == i),
+                                onDragStart = { startPos ->
                                     draggedSlotIndex = i
-                                    dragGlobalPosition = startOffset
+                                    dragGlobalPosition = startPos
                                 },
                                 onDrag = { dragDelta ->
                                     dragGlobalPosition += dragDelta
@@ -292,23 +292,46 @@ fun GameScreen(
             }
         }
 
-        // Floating Shape Overlay during Drag
+        // Floating Shape Overlay during Drag (follows finger smoothly with vertical offset)
         if (draggedSlotIndex != null) {
             val shape = viewModel.availableShapes.getOrNull(draggedSlotIndex!!)
-            if (shape != null) {
-                val cellSize = with(density) { (boardBounds.width / 8f).toDp() }
-                val liftedY = dragGlobalPosition.y - liftOffsetPx
+            if (shape != null && boardBounds.width > 0f) {
+                val boardCellWidth = boardBounds.width / 8f
+                val boardCellHeight = boardBounds.height / 8f
+                val boardCellDp = with(density) { boardCellWidth.toDp() }
+
+                // Determine whether to snap to grid cells or follow finger with lift
+                val targetLeftPx: Float
+                val targetTopPx: Float
+
+                if (hoveredCoord != null) {
+                    // Snapped to board cells for crisp alignment like original Block Blast
+                    val (hoverRow, hoverCol) = hoveredCoord
+                    targetLeftPx = boardBounds.left + hoverCol * boardCellWidth
+                    targetTopPx = boardBounds.top + hoverRow * boardCellHeight
+                } else {
+                    // Free floating 85dp above finger
+                    val shapeWidthPx = shape.width * boardCellWidth
+                    val shapeHeightPx = shape.height * boardCellHeight
+                    targetLeftPx = dragGlobalPosition.x - shapeWidthPx / 2f
+                    targetTopPx = (dragGlobalPosition.y - fingerLiftPx) - shapeHeightPx / 2f
+                }
 
                 Box(
                     modifier = Modifier
                         .offset {
                             IntOffset(
-                                x = (dragGlobalPosition.x - with(density) { (shape.width * cellSize.toPx()) / 2f }).roundToInt(),
-                                y = (liftedY - with(density) { (shape.height * cellSize.toPx()) / 2f }).roundToInt()
+                                x = targetLeftPx.roundToInt(),
+                                y = targetTopPx.roundToInt()
                             )
                         }
                 ) {
-                    ShapePreview(shape = shape, cellSize = cellSize)
+                    ShapePreview(
+                        shape = shape,
+                        cellSize = boardCellDp,
+                        padding = 2.dp,
+                        cornerRadiusFactor = 0.22f
+                    )
                 }
             }
         }
@@ -500,25 +523,28 @@ fun GameBoardGrid(
 @Composable
 fun ShapeItemView(
     shape: BlockShape,
+    isBeingDragged: Boolean,
     onDragStart: (Offset) -> Unit,
     onDrag: (Offset) -> Unit,
     onDragEnd: () -> Unit
 ) {
-    var globalPos by remember { mutableStateOf(Offset.Zero) }
+    var itemBounds by remember { mutableStateOf(Rect.Zero) }
 
     Box(
         modifier = Modifier
+            .alpha(if (isBeingDragged) 0f else 1f)
             .onGloballyPositioned { coordinates ->
-                globalPos = coordinates.boundsInRoot().center
+                itemBounds = coordinates.boundsInRoot()
             }
             .pointerInput(shape) {
                 detectDragGestures(
-                    onDragStart = {
-                        onDragStart(globalPos)
+                    onDragStart = { localOffset ->
+                        val touchGlobal = itemBounds.topLeft + localOffset
+                        onDragStart(touchGlobal)
                     },
-                    onDrag = { change, dragAmount ->
+                    onDrag = { change, dragDelta ->
                         change.consume()
-                        onDrag(dragAmount)
+                        onDrag(dragDelta)
                     },
                     onDragEnd = {
                         onDragEnd()
@@ -530,14 +556,21 @@ fun ShapeItemView(
             },
         contentAlignment = Alignment.Center
     ) {
-        ShapePreview(shape = shape, cellSize = 18.dp)
+        ShapePreview(
+            shape = shape,
+            cellSize = 20.dp,
+            padding = 1.5.dp,
+            cornerRadiusFactor = 0.22f
+        )
     }
 }
 
 @Composable
 fun ShapePreview(
     shape: BlockShape,
-    cellSize: androidx.compose.ui.unit.Dp
+    cellSize: androidx.compose.ui.unit.Dp,
+    padding: androidx.compose.ui.unit.Dp = 1.5.dp,
+    cornerRadiusFactor: Float = 0.22f
 ) {
     Column {
         for (r in 0 until shape.height) {
@@ -547,13 +580,13 @@ fun ShapePreview(
                     Box(
                         modifier = Modifier
                             .size(cellSize)
-                            .padding(1.5.dp)
+                            .padding(padding)
                     ) {
                         if (hasBlock) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .clip(RoundedCornerShape(cellSize * 0.22f))
+                                    .clip(RoundedCornerShape(cellSize * cornerRadiusFactor))
                                     .background(BlockGray)
                             )
                         }
