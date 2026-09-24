@@ -3,6 +3,13 @@ package com.blockblast.amoled
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,9 +24,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -32,12 +42,30 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import kotlinx.coroutines.delay
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.random.Random
+
+val PlacedBlockColor = Color(0xFF4C4C4C)   // Darker gray for blocks already on the board
+val ActiveBlockColor = Color(0xFF8E8E8E)   // Lighter gray for candidate and dragged blocks
+val GlowColor = Color(0xFFEEEEEE)          // Crisp white glow for lines about to clear
 
 enum class AppScreen {
     MENU,
     GAME
 }
+
+data class Particle(
+    val x: Float,
+    val y: Float,
+    val vx: Float,
+    val vy: Float,
+    val color: Color,
+    val size: Float,
+    val alpha: Float
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,7 +124,6 @@ fun MainMenuScreen(onStartClassic: () -> Unit) {
 
             Spacer(modifier = Modifier.height(130.dp))
 
-            // Classic Button (pure dark gray, rounded rectangle, ∞ Classic)
             Box(
                 modifier = Modifier
                     .width(260.dp)
@@ -138,16 +165,34 @@ fun GameScreen(
 ) {
     var showSettingsDialog by remember { mutableStateOf(false) }
 
-    // Drag and Drop state
     var draggedSlotIndex by remember { mutableStateOf<Int?>(null) }
     var dragGlobalPosition by remember { mutableStateOf(Offset.Zero) }
     var boardBounds by remember { mutableStateOf(Rect.Zero) }
 
+    // Particle explosion state
+    var particles by remember { mutableStateOf<List<Particle>>(emptyList()) }
+    var clearMessage by remember { mutableStateOf<String?>(null) }
+
+    // LaunchedEffect loop for particle animation
+    LaunchedEffect(particles.isNotEmpty()) {
+        while (particles.isNotEmpty()) {
+            delay(16)
+            particles = particles.mapNotNull { p ->
+                val nextAlpha = p.alpha - 0.045f
+                if (nextAlpha <= 0f) null
+                else p.copy(
+                    x = p.x + p.vx,
+                    y = p.y + p.vy,
+                    alpha = nextAlpha
+                )
+            }
+        }
+    }
+
     val density = LocalDensity.current
-    // Offset piece 85dp above finger so finger does not block view of piece or board
     val fingerLiftPx = with(density) { 85.dp.toPx() }
 
-    // Calculate hover grid coordinate (where the ghost preview should appear)
+    // Calculate hover coordinate
     val hoveredCoord: Pair<Int, Int>? = remember(draggedSlotIndex, dragGlobalPosition, boardBounds) {
         val slot = draggedSlotIndex ?: return@remember null
         val shape = viewModel.availableShapes.getOrNull(slot) ?: return@remember null
@@ -167,6 +212,37 @@ fun GameScreen(
         } else {
             null
         }
+    }
+
+    // Determine which lines will be cleared upon placement (Pre-clear Glowing Lines)
+    val glowingLines: Pair<Set<Int>, Set<Int>> = remember(hoveredCoord, draggedSlotIndex) {
+        val coord = hoveredCoord ?: return@remember emptySet<Int>() to emptySet<Int>()
+        val slot = draggedSlotIndex ?: return@remember emptySet<Int>() to emptySet<Int>()
+        val shape = viewModel.availableShapes.getOrNull(slot) ?: return@remember emptySet<Int>() to emptySet<Int>()
+
+        val simBoard = Array(8) { r -> viewModel.board[r].clone() }
+        for ((r, c) in shape.cells) {
+            simBoard[coord.first + r][coord.second + c] = true
+        }
+
+        val rows = mutableSetOf<Int>()
+        for (r in 0..7) {
+            if (simBoard[r].all { it }) rows.add(r)
+        }
+
+        val cols = mutableSetOf<Int>()
+        for (c in 0..7) {
+            var allCol = true
+            for (r in 0..7) {
+                if (!simBoard[r][c]) {
+                    allCol = false
+                    break
+                }
+            }
+            if (allCol) cols.add(c)
+        }
+
+        rows to cols
     }
 
     Box(
@@ -189,7 +265,6 @@ fun GameScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Crown + Best Score
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         painter = painterResource(id = R.drawable.ic_crown),
@@ -207,7 +282,6 @@ fun GameScreen(
                     )
                 }
 
-                // Settings Gear
                 IconButton(onClick = { showSettingsDialog = true }) {
                     Icon(
                         imageVector = Icons.Default.Settings,
@@ -218,18 +292,41 @@ fun GameScreen(
                 }
             }
 
-            // Current Score
-            Text(
-                text = "${viewModel.score}",
-                color = Color.White,
-                fontSize = 68.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = GoogleSans,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
+            // Score and Combo Display Section
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                // Animated Combo Header right above the score
+                Box(modifier = Modifier.height(28.dp), contentAlignment = Alignment.Center) {
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = viewModel.combo > 0,
+                        enter = fadeIn() + scaleIn(),
+                        exit = fadeOut() + scaleOut()
+                    ) {
+                        Text(
+                            text = "Combo: ${viewModel.combo}",
+                            color = Color(0xFFE0E0E0),
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = GoogleSans,
+                            letterSpacing = 1.sp
+                        )
+                    }
+                }
 
-            // 8x8 Game Board
+                // Current Score
+                Text(
+                    text = "${viewModel.score}",
+                    color = Color.White,
+                    fontSize = 68.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = GoogleSans,
+                    textAlign = TextAlign.Center
+                )
+            }
+
+            // 8x8 Game Board with Pre-clear Line Glow
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -243,8 +340,39 @@ fun GameScreen(
                 GameBoardGrid(
                     board = viewModel.board,
                     hoverCoord = hoveredCoord,
-                    hoverShape = draggedSlotIndex?.let { viewModel.availableShapes.getOrNull(it) }
+                    hoverShape = draggedSlotIndex?.let { viewModel.availableShapes.getOrNull(it) },
+                    glowingRows = glowingLines.first,
+                    glowingCols = glowingLines.second
                 )
+
+                // Particle explosion canvas overlay
+                if (particles.isNotEmpty()) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        particles.forEach { p ->
+                            drawCircle(
+                                color = p.color.copy(alpha = p.alpha),
+                                radius = p.size,
+                                center = Offset(p.x, p.y)
+                            )
+                        }
+                    }
+                }
+
+                // Temporary Combo pop-up over board
+                if (clearMessage != null) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = clearMessage ?: "",
+                            color = Color.White,
+                            fontSize = 32.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = GoogleSans
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -277,9 +405,65 @@ fun GameScreen(
                                     dragGlobalPosition += dragDelta
                                 },
                                 onDragEnd = {
-                                    // Place shape if dropped over valid grid position
-                                    hoveredCoord?.let { (r, c) ->
-                                        viewModel.placeShape(i, r, c)
+                                    val target = hoveredCoord
+                                    if (target != null) {
+                                        val (r, c) = target
+                                        val rowsToClear = glowingLines.first
+                                        val colsToClear = glowingLines.second
+
+                                        val placed = viewModel.placeShape(i, r, c)
+                                        if (placed && (rowsToClear.isNotEmpty() || colsToClear.isNotEmpty())) {
+                                            // Spawn particles along the cleared cells
+                                            val cellW = boardBounds.width / 8f
+                                            val cellH = boardBounds.height / 8f
+                                            val newParticles = mutableListOf<Particle>()
+
+                                            for (row in rowsToClear) {
+                                                for (col in 0..7) {
+                                                    val cx = col * cellW + cellW / 2f
+                                                    val cy = row * cellH + cellH / 2f
+                                                    for (k in 0..5) {
+                                                        val angle = Random.nextFloat() * 2f * Math.PI.toFloat()
+                                                        val speed = Random.nextFloat() * 7f + 2f
+                                                        newParticles.add(
+                                                            Particle(
+                                                                x = cx,
+                                                                y = cy,
+                                                                vx = cos(angle) * speed,
+                                                                vy = sin(angle) * speed,
+                                                                color = if (k % 2 == 0) Color.White else Color(0xFFB0B0B0),
+                                                                size = Random.nextFloat() * 4f + 3f,
+                                                                alpha = 1f
+                                                            )
+                                                        )
+                                                    }
+                                                }
+                                            }
+
+                                            for (col in colsToClear) {
+                                                for (row in 0..7) {
+                                                    val cx = col * cellW + cellW / 2f
+                                                    val cy = row * cellH + cellH / 2f
+                                                    for (k in 0..5) {
+                                                        val angle = Random.nextFloat() * 2f * Math.PI.toFloat()
+                                                        val speed = Random.nextFloat() * 7f + 2f
+                                                        newParticles.add(
+                                                            Particle(
+                                                                x = cx,
+                                                                y = cy,
+                                                                vx = cos(angle) * speed,
+                                                                vy = sin(angle) * speed,
+                                                                color = if (k % 2 == 0) Color.White else Color(0xFFB0B0B0),
+                                                                size = Random.nextFloat() * 4f + 3f,
+                                                                alpha = 1f
+                                                            )
+                                                        )
+                                                    }
+                                                }
+                                            }
+
+                                            particles = newParticles
+                                        }
                                     }
                                     draggedSlotIndex = null
                                 }
@@ -290,8 +474,7 @@ fun GameScreen(
             }
         }
 
-        // Floating Shape Overlay during Drag:
-        // Smoothly follows the finger 1:1 with 85dp upward lift without snapping or jumping!
+        // Floating Shape Overlay during Drag (smooth 1:1 follow with 85dp lift)
         if (draggedSlotIndex != null) {
             val shape = viewModel.availableShapes.getOrNull(draggedSlotIndex!!)
             if (shape != null && boardBounds.width > 0f) {
@@ -318,13 +501,14 @@ fun GameScreen(
                         shape = shape,
                         cellSize = boardCellDp,
                         padding = 2.dp,
+                        blockColor = ActiveBlockColor,
                         cornerRadiusFactor = 0.22f
                     )
                 }
             }
         }
 
-        // Settings Dialog (Exit to Main Menu)
+        // Settings Dialog
         if (showSettingsDialog) {
             Dialog(onDismissRequest = { showSettingsDialog = false }) {
                 Card(
@@ -413,7 +597,7 @@ fun GameScreen(
 
                         Button(
                             onClick = { viewModel.startNewGame() },
-                            colors = ButtonDefaults.buttonColors(containerColor = BlockGray),
+                            colors = ButtonDefaults.buttonColors(containerColor = ActiveBlockColor),
                             shape = RoundedCornerShape(16.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -458,7 +642,9 @@ fun GameScreen(
 fun GameBoardGrid(
     board: Array<BooleanArray>,
     hoverCoord: Pair<Int, Int>?,
-    hoverShape: BlockShape?
+    hoverShape: BlockShape?,
+    glowingRows: Set<Int>,
+    glowingCols: Set<Int>
 ) {
     val hoverCells = remember(hoverCoord, hoverShape) {
         if (hoverCoord != null && hoverShape != null) {
@@ -467,6 +653,18 @@ fun GameBoardGrid(
             emptySet()
         }
     }
+
+    // Pulsing animation for lines about to be cleared
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+    val pulseGlowAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 0.95f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(400, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "glow"
+    )
 
     Column(modifier = Modifier.fillMaxSize()) {
         for (r in 0..7) {
@@ -478,6 +676,7 @@ fun GameBoardGrid(
                 for (c in 0..7) {
                     val isFilled = board[r][c]
                     val isHovered = (r to c) in hoverCells
+                    val isLineGlowing = r in glowingRows || c in glowingCols
 
                     Box(
                         modifier = Modifier
@@ -487,20 +686,31 @@ fun GameBoardGrid(
                             .padding(2.dp)
                     ) {
                         if (isFilled) {
-                            // Placed solid block
+                            // Darker block placed on board
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .clip(RoundedCornerShape(6.dp))
-                                    .background(BlockGray)
+                                    .background(PlacedBlockColor)
                             )
                         } else if (isHovered) {
-                            // Semi-transparent ghost preview block on grid (like original Block Blast)
+                            // Semi-transparent ghost preview
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .clip(RoundedCornerShape(6.dp))
-                                    .background(Color(0x557E7E7E))
+                                    .background(Color(0x558E8E8E))
+                            )
+                        }
+
+                        // Glowing line overlay when this row/col is about to be cleared
+                        if (isLineGlowing) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(GlowColor.copy(alpha = pulseGlowAlpha * 0.35f))
+                                    .border(1.5.dp, GlowColor.copy(alpha = pulseGlowAlpha), RoundedCornerShape(6.dp))
                             )
                         }
                     }
@@ -520,7 +730,6 @@ fun ShapeItemView(
 ) {
     var itemBounds by remember { mutableStateOf(Rect.Zero) }
 
-    // Use rememberUpdatedState to guarantee latest lambdas are called without stale closures
     val currentOnDragStart by rememberUpdatedState(onDragStart)
     val currentOnDrag by rememberUpdatedState(onDrag)
     val currentOnDragEnd by rememberUpdatedState(onDragEnd)
@@ -555,6 +764,7 @@ fun ShapeItemView(
             shape = shape,
             cellSize = 20.dp,
             padding = 1.5.dp,
+            blockColor = ActiveBlockColor,
             cornerRadiusFactor = 0.22f
         )
     }
@@ -565,6 +775,7 @@ fun ShapePreview(
     shape: BlockShape,
     cellSize: androidx.compose.ui.unit.Dp,
     padding: androidx.compose.ui.unit.Dp = 1.5.dp,
+    blockColor: Color = ActiveBlockColor,
     cornerRadiusFactor: Float = 0.22f
 ) {
     Column {
@@ -582,7 +793,7 @@ fun ShapePreview(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .clip(RoundedCornerShape(cellSize * cornerRadiusFactor))
-                                    .background(BlockGray)
+                                    .background(blockColor)
                             )
                         }
                     }
