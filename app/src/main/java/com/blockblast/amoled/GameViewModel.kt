@@ -30,6 +30,10 @@ class GameViewModel(context: Context) : ViewModel() {
     var isGameOver by mutableStateOf(false)
         private set
 
+    // Track line clearing across decks of 3 blocks
+    private var clearedInCurrentDeck = false
+    private var decksWithoutClear = 0
+
     init {
         startNewGame()
     }
@@ -38,6 +42,8 @@ class GameViewModel(context: Context) : ViewModel() {
         board = Array(8) { BooleanArray(8) { false } }
         score = 0
         combo = 0
+        clearedInCurrentDeck = false
+        decksWithoutClear = 0
         isGameOver = false
         refreshShapes()
     }
@@ -104,6 +110,9 @@ class GameViewModel(context: Context) : ViewModel() {
         val clearedLines = fullRows.size + fullCols.size
         if (clearedLines > 0) {
             combo += 1
+            clearedInCurrentDeck = true
+            decksWithoutClear = 0
+
             val clearPoints = clearedLines * 10 * (combo + 1)
             score += clearPoints
 
@@ -115,8 +124,6 @@ class GameViewModel(context: Context) : ViewModel() {
             for (c in fullCols) {
                 for (r in 0..7) newBoard[r][c] = false
             }
-        } else {
-            combo = 0
         }
 
         board = newBoard
@@ -132,8 +139,19 @@ class GameViewModel(context: Context) : ViewModel() {
         updatedShapes[slotIndex] = null
         availableShapes = updatedShapes
 
-        // If all 3 shapes used, refresh
+        // If all 3 shapes in current deck were used, evaluate deck transition
         if (availableShapes.all { it == null }) {
+            if (clearedInCurrentDeck) {
+                decksWithoutClear = 0
+            } else if (combo > 0) {
+                decksWithoutClear += 1
+                // Combo only resets if player cleared no lines across this deck and the next one
+                if (decksWithoutClear >= 2) {
+                    combo = 0
+                    decksWithoutClear = 0
+                }
+            }
+            clearedInCurrentDeck = false
             refreshShapes()
         } else {
             checkGameOver()
