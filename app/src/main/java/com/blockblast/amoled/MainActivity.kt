@@ -3,8 +3,6 @@ package com.blockblast.amoled
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -146,10 +144,10 @@ fun GameScreen(
     var boardBounds by remember { mutableStateOf(Rect.Zero) }
 
     val density = LocalDensity.current
-    // Offset piece 85dp above finger so it is fully visible above player's thumb
+    // Offset piece 85dp above finger so finger does not block view of piece or board
     val fingerLiftPx = with(density) { 85.dp.toPx() }
 
-    // Calculate hover cell
+    // Calculate hover grid coordinate (where the ghost preview should appear)
     val hoveredCoord: Pair<Int, Int>? = remember(draggedSlotIndex, dragGlobalPosition, boardBounds) {
         val slot = draggedSlotIndex ?: return@remember null
         val shape = viewModel.availableShapes.getOrNull(slot) ?: return@remember null
@@ -158,7 +156,6 @@ fun GameScreen(
         val cellWidth = boardBounds.width / 8f
         val cellHeight = boardBounds.height / 8f
 
-        // Position lifted above the finger
         val pieceCenterX = dragGlobalPosition.x
         val pieceCenterY = dragGlobalPosition.y - fingerLiftPx
 
@@ -280,6 +277,7 @@ fun GameScreen(
                                     dragGlobalPosition += dragDelta
                                 },
                                 onDragEnd = {
+                                    // Place shape if dropped over valid grid position
                                     hoveredCoord?.let { (r, c) ->
                                         viewModel.placeShape(i, r, c)
                                     }
@@ -292,7 +290,8 @@ fun GameScreen(
             }
         }
 
-        // Floating Shape Overlay during Drag (follows finger smoothly with vertical offset)
+        // Floating Shape Overlay during Drag:
+        // Smoothly follows the finger 1:1 with 85dp upward lift without snapping or jumping!
         if (draggedSlotIndex != null) {
             val shape = viewModel.availableShapes.getOrNull(draggedSlotIndex!!)
             if (shape != null && boardBounds.width > 0f) {
@@ -300,29 +299,18 @@ fun GameScreen(
                 val boardCellHeight = boardBounds.height / 8f
                 val boardCellDp = with(density) { boardCellWidth.toDp() }
 
-                // Determine whether to snap to grid cells or follow finger with lift
-                val targetLeftPx: Float
-                val targetTopPx: Float
+                val shapeWidthPx = shape.width * boardCellWidth
+                val shapeHeightPx = shape.height * boardCellHeight
 
-                if (hoveredCoord != null) {
-                    // Snapped to board cells for crisp alignment like original Block Blast
-                    val (hoverRow, hoverCol) = hoveredCoord
-                    targetLeftPx = boardBounds.left + hoverCol * boardCellWidth
-                    targetTopPx = boardBounds.top + hoverRow * boardCellHeight
-                } else {
-                    // Free floating 85dp above finger
-                    val shapeWidthPx = shape.width * boardCellWidth
-                    val shapeHeightPx = shape.height * boardCellHeight
-                    targetLeftPx = dragGlobalPosition.x - shapeWidthPx / 2f
-                    targetTopPx = (dragGlobalPosition.y - fingerLiftPx) - shapeHeightPx / 2f
-                }
+                val floatLeftPx = dragGlobalPosition.x - shapeWidthPx / 2f
+                val floatTopPx = (dragGlobalPosition.y - fingerLiftPx) - shapeHeightPx / 2f
 
                 Box(
                     modifier = Modifier
                         .offset {
                             IntOffset(
-                                x = targetLeftPx.roundToInt(),
-                                y = targetTopPx.roundToInt()
+                                x = floatLeftPx.roundToInt(),
+                                y = floatTopPx.roundToInt()
                             )
                         }
                 ) {
@@ -499,6 +487,7 @@ fun GameBoardGrid(
                             .padding(2.dp)
                     ) {
                         if (isFilled) {
+                            // Placed solid block
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -506,11 +495,12 @@ fun GameBoardGrid(
                                     .background(BlockGray)
                             )
                         } else if (isHovered) {
+                            // Semi-transparent ghost preview block on grid (like original Block Blast)
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .clip(RoundedCornerShape(6.dp))
-                                    .background(GhostBlockColor)
+                                    .background(Color(0x557E7E7E))
                             )
                         }
                     }
@@ -530,6 +520,11 @@ fun ShapeItemView(
 ) {
     var itemBounds by remember { mutableStateOf(Rect.Zero) }
 
+    // Use rememberUpdatedState to guarantee latest lambdas are called without stale closures
+    val currentOnDragStart by rememberUpdatedState(onDragStart)
+    val currentOnDrag by rememberUpdatedState(onDrag)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
+
     Box(
         modifier = Modifier
             .alpha(if (isBeingDragged) 0f else 1f)
@@ -540,17 +535,17 @@ fun ShapeItemView(
                 detectDragGestures(
                     onDragStart = { localOffset ->
                         val touchGlobal = itemBounds.topLeft + localOffset
-                        onDragStart(touchGlobal)
+                        currentOnDragStart(touchGlobal)
                     },
                     onDrag = { change, dragDelta ->
                         change.consume()
-                        onDrag(dragDelta)
+                        currentOnDrag(dragDelta)
                     },
                     onDragEnd = {
-                        onDragEnd()
+                        currentOnDragEnd()
                     },
                     onDragCancel = {
-                        onDragEnd()
+                        currentOnDragEnd()
                     }
                 )
             },
